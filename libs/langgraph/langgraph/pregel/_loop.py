@@ -110,6 +110,7 @@ from langgraph.pregel._executor import (
     Submit,
 )
 from langgraph.pregel._io import (
+    _rekey_with_aliases,
     map_command,
     map_input,
     map_output_updates,
@@ -167,6 +168,8 @@ class PregelLoop:
     nodes: Mapping[str, PregelNode]
     specs: Mapping[str, BaseChannel | ManagedValueSpec]
     input_keys: str | Sequence[str]
+    input_alias_map: dict[str, str] | None
+    output_alias_map: dict[str, str] | None
     output_keys: str | Sequence[str]
     stream_keys: str | Sequence[str]
     is_replaying: bool
@@ -277,6 +280,8 @@ class PregelLoop:
         nodes: Mapping[str, PregelNode],
         specs: Mapping[str, BaseChannel | ManagedValueSpec],
         input_keys: str | Sequence[str],
+        input_alias_map: dict[str, str] | None,
+        output_alias_map: dict[str, str] | None,
         output_keys: str | Sequence[str],
         stream_keys: str | Sequence[str],
         trigger_to_nodes: Mapping[str, Sequence[str]],
@@ -300,6 +305,8 @@ class PregelLoop:
         self.nodes = nodes
         self.specs = specs
         self.input_keys = input_keys
+        self.input_alias_map = input_alias_map
+        self.output_alias_map = output_alias_map
         self.output_keys = output_keys
         self.stream_keys = stream_keys
         self.interrupt_after = interrupt_after
@@ -692,7 +699,12 @@ class PregelLoop:
             else self.output_keys
         ):
             self._emit(
-                "values", map_output_values, self.output_keys, writes, self.channels
+                "values",
+                map_output_values,
+                self.output_keys,
+                writes,
+                self.channels,
+                output_alias_map=self.output_alias_map,
             )
         # capture delta-channel writes for exit-mode accumulator before clearing
         if self._exit_delta_writes is not None:
@@ -960,10 +972,17 @@ class PregelLoop:
                 self._put_checkpoint({"source": "fork"})
             # produce values output
             self._emit(
-                "values", map_output_values, self.output_keys, True, self.channels
+                "values",
+                map_output_values,
+                self.output_keys,
+                True,
+                self.channels,
+                output_alias_map=self.output_alias_map,
             )
         # map inputs to channel updates
-        elif input_writes := deque(map_input(input_keys, self.input)):
+        elif input_writes := deque(
+            map_input(input_keys, self.input, alias_map=self.input_alias_map)
+        ):
             # discard any unfinished tasks from previous checkpoint
             discard_tasks = prepare_next_tasks(
                 self.checkpoint,
@@ -1339,6 +1358,7 @@ class PregelLoop:
                         self.output_keys,
                         [w for t in self.tasks.values() for w in t.writes],
                         self.channels,
+                        output_alias_map=self.output_alias_map,
                     )
             # emit INTERRUPT if exception is empty (otherwise emitted by put_writes)
             if not interrupt.args or not interrupt.args[0]:
@@ -1348,12 +1368,18 @@ class PregelLoop:
                     lambda: iter([{INTERRUPT: interrupt_payload}]),
                 )
             # save final output
-            self.output = read_channels(self.channels, self.output_keys)
+            self.output = _rekey_with_aliases(
+                read_channels(self.channels, self.output_keys),
+                self.output_alias_map,
+            )
             # suppress interrupt
             return True
         elif exc_type is None:
             # save final output
-            self.output = read_channels(self.channels, self.output_keys)
+            self.output = _rekey_with_aliases(
+                read_channels(self.channels, self.output_keys),
+                self.output_alias_map,
+            )
 
     def _emit(
         self,
@@ -1419,7 +1445,10 @@ class PregelLoop:
                 if "updates" in stream_modes:
                     self._emit("updates", lambda: iter(interrupts))
                 if "values" in stream_modes:
-                    current_values = read_channels(self.channels, self.output_keys)
+                    current_values = _rekey_with_aliases(
+                        read_channels(self.channels, self.output_keys),
+                        self.output_alias_map,
+                    )
                     # self.output_keys is a sequence, stream chunk contains entire state and interrupts
                     if isinstance(current_values, dict):
                         current_values[INTERRUPT] = interrupts[0][INTERRUPT]
@@ -1434,6 +1463,7 @@ class PregelLoop:
                     self.output_keys,
                     [(task, writes)],
                     cached,
+                    output_alias_map=self.output_alias_map,
                 )
             if not cached:
                 self._emit(
@@ -1462,6 +1492,8 @@ class SyncPregelLoop(PregelLoop, AbstractContextManager):
         interrupt_after: All | Sequence[str] = EMPTY_SEQ,
         interrupt_before: All | Sequence[str] = EMPTY_SEQ,
         input_keys: str | Sequence[str] = EMPTY_SEQ,
+        input_alias_map: dict[str, str] | None = None,
+        output_alias_map: dict[str, str] | None = None,
         output_keys: str | Sequence[str] = EMPTY_SEQ,
         stream_keys: str | Sequence[str] = EMPTY_SEQ,
         migrate_checkpoint: Callable[[Checkpoint], None] | None = None,
@@ -1479,6 +1511,8 @@ class SyncPregelLoop(PregelLoop, AbstractContextManager):
             nodes=nodes,
             specs=specs,
             input_keys=input_keys,
+            input_alias_map=input_alias_map,
+            output_alias_map=output_alias_map,
             output_keys=output_keys,
             stream_keys=stream_keys,
             interrupt_after=interrupt_after,
@@ -1714,6 +1748,8 @@ class AsyncPregelLoop(PregelLoop, AbstractAsyncContextManager):
         interrupt_before: All | Sequence[str] = EMPTY_SEQ,
         manager: None | AsyncParentRunManager | ParentRunManager = None,
         input_keys: str | Sequence[str] = EMPTY_SEQ,
+        input_alias_map: dict[str, str] | None = None,
+        output_alias_map: dict[str, str] | None = None,
         output_keys: str | Sequence[str] = EMPTY_SEQ,
         stream_keys: str | Sequence[str] = EMPTY_SEQ,
         migrate_checkpoint: Callable[[Checkpoint], None] | None = None,
@@ -1731,6 +1767,8 @@ class AsyncPregelLoop(PregelLoop, AbstractAsyncContextManager):
             nodes=nodes,
             specs=specs,
             input_keys=input_keys,
+            input_alias_map=input_alias_map,
+            output_alias_map=output_alias_map,
             output_keys=output_keys,
             stream_keys=stream_keys,
             interrupt_after=interrupt_after,
