@@ -14,7 +14,7 @@ dependencies = [
     "aiohappyeyeballs==2.4.3",
     "hub>=3.0.1,<4",
     "xxhash>=3.5.0,<4",
-    "black>=25.1.0,<26",
+    "black>=26.5.1,<27",
 ]
 
 [dependency-groups]
